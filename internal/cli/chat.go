@@ -167,9 +167,12 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	// Set up logger status updater to send status messages to the TUI
+	// Set up logger status updater to send status messages to the TUI (non-blocking)
 	logger.SetStatusUpdater(func(msg string) {
-		p.Send(statusMsg{message: msg})
+		// Use goroutine to prevent blocking
+		go func() {
+			p.Send(statusMsg{message: msg})
+		}()
 	})
 
 	_, err = p.Run()

@@ -1,8 +1,8 @@
 package logger
 
 import (
+	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 	"time"
@@ -10,7 +10,7 @@ import (
 
 var (
 	logFile       *os.File
-	logWriter     io.Writer
+	logWriter     *bufio.Writer
 	mu            sync.Mutex
 	enabled       bool
 	statusUpdater func(string) // Callback to update status bar in TUI
@@ -27,16 +27,16 @@ func Init(filePath string) error {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 
 	var err error
 	logFile, err = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
+		mu.Unlock()
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	// Write only to file, not to stderr (to avoid interfering with TUI)
-	logWriter = logFile
+	// Use a buffered writer to avoid blocking on file I/O
+	logWriter = bufio.NewWriterSize(logFile, 64*1024) // 64KB buffer
 	enabled = true
 	sessionID = time.Now().Format("20060102-150405")
 
@@ -47,10 +47,16 @@ func Init(filePath string) error {
 	// Start async writer goroutine
 	go func() {
 		for msg := range logChan {
-			fmt.Fprintln(logWriter, msg)
+			if logWriter != nil {
+				logWriter.WriteString(msg)
+				logWriter.WriteString("\n")
+				logWriter.Flush() // Flush immediately to ensure writes don't accumulate
+			}
 		}
 		close(done)
 	}()
+
+	mu.Unlock() // Release lock before calling Log() to avoid deadlock
 
 	Log("=== Llemecode Session Started ===")
 	Log("Session ID: %s", sessionID)
@@ -70,13 +76,14 @@ func Close() {
 	if wasEnabled {
 		Log("=== Session Ended ===")
 		close(logChan)
-		<-done // Wait for all messages to be written
+		<-done // Wait for all messages to be written and flushed
 
 		mu.Lock()
 		if logFile != nil {
 			logFile.Close()
 			logFile = nil
 		}
+		logWriter = nil
 		mu.Unlock()
 	}
 }

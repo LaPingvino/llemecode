@@ -127,28 +127,18 @@ func (a *Agent) Chat(ctx context.Context, userMessage string) (*Response, error)
 
 		// Parse tool calls based on format
 		toolCalls := a.extractToolCalls(chatResp)
-		fmt.Printf("[DEBUG] Agent.Chat: Extracted %d tool calls\n", len(toolCalls))
 
 		if len(toolCalls) == 0 {
 			// No tool calls - we're done
 			// Collect the final response content (could be just text or text + reasoning about tool results)
-			fmt.Printf("[DEBUG] Agent.Chat: No tool calls, returning response\n")
 			response.Content = chatResp.Message.Content
 			return &response, nil
 		}
 
 		// Execute tool calls
-		fmt.Printf("[DEBUG] Agent.Chat: Executing %d tool calls\n", len(toolCalls))
-		for idx, tc := range toolCalls {
-			fmt.Printf("[DEBUG] Agent.Chat: Tool call %d: name=%q, args=%v\n", idx, tc.Function.Name, tc.Function.Arguments)
-		}
-
 		if err := a.executeToolCalls(ctx, toolCalls, &response); err != nil {
-			fmt.Printf("[DEBUG] Agent.Chat: executeToolCalls error: %v\n", err)
 			return nil, err
 		}
-
-		fmt.Printf("[DEBUG] Agent.Chat: Tool calls executed successfully, continuing loop\n")
 
 		// After executing tools, continue loop to let LLM respond with the results
 		// The LLM will see the tool results and provide a final answer
@@ -182,9 +172,7 @@ func (a *Agent) performChat(ctx context.Context) (*ollama.ChatResponse, error) {
 			})
 		}
 		req.Tools = ollamaTools
-		fmt.Printf("[DEBUG] performChat: Added %d tools to request (native format)\n", len(ollamaTools))
 	} else {
-		fmt.Printf("[DEBUG] performChat: Not adding tools to request (format: %q)\n", a.toolCallFormat)
 	}
 
 	resp, err := a.client.Chat(ctx, req)
@@ -192,25 +180,18 @@ func (a *Agent) performChat(ctx context.Context) (*ollama.ChatResponse, error) {
 		return nil, err
 	}
 
-	fmt.Printf("[DEBUG] performChat: Response received - Role: %q, Content length: %d, ToolCalls: %d\n",
-		resp.Message.Role, len(resp.Message.Content), len(resp.ToolCalls))
-
 	return resp, nil
 }
 
 func (a *Agent) extractToolCalls(resp *ollama.ChatResponse) []ollama.ToolCall {
-	fmt.Printf("[DEBUG] extractToolCalls: Tool call format: %q\n", a.toolCallFormat)
-	fmt.Printf("[DEBUG] extractToolCalls: Native tool calls count: %d\n", len(resp.ToolCalls))
 
 	// Native tool calls
 	if len(resp.ToolCalls) > 0 {
-		fmt.Printf("[DEBUG] extractToolCalls: Using native tool calls\n")
 		return resp.ToolCalls
 	}
 
 	// Parse fallback formats
 	content := resp.Message.Content
-	fmt.Printf("[DEBUG] extractToolCalls: Parsing fallback format %q from content\n", a.toolCallFormat)
 
 	var calls []ollama.ToolCall
 	switch a.toolCallFormat {
@@ -222,7 +203,6 @@ func (a *Agent) extractToolCalls(resp *ollama.ChatResponse) []ollama.ToolCall {
 		calls = a.parseTextToolCalls(content)
 	}
 
-	fmt.Printf("[DEBUG] extractToolCalls: Parsed %d tool calls from fallback format\n", len(calls))
 	return calls
 }
 
@@ -362,23 +342,18 @@ func (a *Agent) parseTextToolCalls(content string) []ollama.ToolCall {
 }
 
 func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ollama.ToolCall, response *Response) error {
-	fmt.Printf("[DEBUG] executeToolCalls: Starting execution of %d tool calls\n", len(toolCalls))
 
-	for idx, toolCall := range toolCalls {
-		fmt.Printf("[DEBUG] executeToolCalls: Processing tool call %d: %q\n", idx, toolCall.Function.Name)
+	for _, toolCall := range toolCalls {
 
 		execution := ToolExecution{
 			Name: toolCall.Function.Name,
 			Args: toolCall.Function.Arguments,
 		}
 
-		fmt.Printf("[DEBUG] executeToolCalls: Calling toolRegistry.Execute for %q\n", toolCall.Function.Name)
 		result, err := a.toolRegistry.Execute(ctx, toolCall.Function.Name, toolCall.Function.Arguments)
 
 		if err != nil {
-			fmt.Printf("[DEBUG] executeToolCalls: Tool %q returned error: %v\n", toolCall.Function.Name, err)
 		} else {
-			fmt.Printf("[DEBUG] executeToolCalls: Tool %q returned result (length %d): %q\n", toolCall.Function.Name, len(result), result)
 		}
 
 		execution.Result = result
@@ -397,13 +372,9 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ollama.ToolCal
 			toolResultMsg.Content = result
 		}
 
-		fmt.Printf("[DEBUG] executeToolCalls: Adding tool result message to conversation (role=%q, tool_name=%q, content_len=%d)\n",
-			toolResultMsg.Role, toolResultMsg.ToolName, len(toolResultMsg.Content))
-
 		a.messages = append(a.messages, toolResultMsg)
 	}
 
-	fmt.Printf("[DEBUG] executeToolCalls: All tool calls executed, total messages in conversation: %d\n", len(a.messages))
 	return nil
 }
 
