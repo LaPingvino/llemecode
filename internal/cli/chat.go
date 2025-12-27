@@ -118,6 +118,7 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 	cmdRegistry.Register(NewEnableToolCommand(cfg, toolRegistry))
 	cmdRegistry.Register(NewDisableToolCommand(cfg, toolRegistry))
 	cmdRegistry.Register(NewListDisabledToolsCommand(cfg))
+	cmdRegistry.Register(NewTestToolCommand(toolRegistry))
 
 	ta := textarea.New()
 	ta.Placeholder = "Type your message or /help for commands..."

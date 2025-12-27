@@ -129,6 +129,43 @@ func (a *Agent) Chat(ctx context.Context, userMessage string) (*Response, error)
 		toolCalls := a.extractToolCalls(chatResp)
 
 		if len(toolCalls) == 0 {
+			// No tool calls - check if we got an empty response which might indicate wrong tool format
+			if len(strings.TrimSpace(chatResp.Message.Content)) == 0 && i == 0 {
+				logger.Log("Agent.Chat: Empty response on first iteration, might be wrong tool format")
+
+				// Try switching to native format if we're not already using it
+				if a.toolCallFormat != "native" {
+					logger.Log("Agent.Chat: Attempting to reconfigure to native tool format")
+
+					// Update model capability in config
+					if cap, ok := a.config.ModelCapabilities[a.model]; ok {
+						cap.ToolCallFormat = "native"
+						cap.SupportsTools = true
+						a.config.ModelCapabilities[a.model] = cap
+					} else {
+						a.config.ModelCapabilities[a.model] = config.ModelCapability{
+							SupportsTools:  true,
+							ToolCallFormat: "native",
+							RecommendedFor: []string{"coding", "tool_use"},
+						}
+					}
+
+					// Save config
+					if err := a.config.Save(); err != nil {
+						logger.Log("Agent.Chat: Failed to save config: %v", err)
+					} else {
+						logger.Log("Agent.Chat: Saved new tool format configuration for %s", a.model)
+					}
+
+					// Update our format
+					a.toolCallFormat = "native"
+
+					// Restart the conversation with the new format
+					logger.Log("Agent.Chat: Restarting chat with native format")
+					return a.Chat(ctx, userMessage)
+				}
+			}
+
 			// No tool calls - we're done
 			// Collect the final response content (could be just text or text + reasoning about tool results)
 			response.Content = chatResp.Message.Content
@@ -380,6 +417,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ollama.ToolCal
 
 func (a *Agent) GetMessages() []ollama.Message {
 	return a.messages
+}
+
+func (a *Agent) GetToolRegistry() *tools.Registry {
+	return a.toolRegistry
 }
 
 func (a *Agent) ClearHistory() {

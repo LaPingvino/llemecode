@@ -1,0 +1,53 @@
+[20:37:23.944] === Llemecode Session Started ===
+[20:37:23.944] Session ID: 20251227-203723
+[20:37:23.944] Log file: debug.log
+[20:37:23.944] ================================
+[20:37:23.944] Llemecode starting with logging enabled
+[20:38:04.017] STATUS: Starting agent.Chat call
+[20:38:04.017] Agent.Chat: Starting chat with message: "Try invoking the ask_gemma2:2b tool with a How are you question and tell me what it answers."
+
+[20:38:04.017] === USER ===
+Try invoking the ask_gemma2:2b tool with a How are you question and tell me what it answers.
+[20:38:04.017] Agent.Chat: Iteration 1/10
+[20:38:04.017] performChat: Using model "gpt-oss:latest" with tool format "text"
+[20:38:04.017] performChat: Message count: 2
+[20:39:28.561] Agent.Chat: Got response from model, content length: 592
+[20:39:28.561] Agent.Chat: Response content: "I’m not able to call a tool named `ask_gemma2:2b` because that tool isn’t defined in the current toolset. The available “ask_*” helpers are:\n\n- `ask_gpt-oss:latest`\n- `ask_phi:2.7b`\n- `ask_deepseek-r1:1.5b`\n- `ask_command-r:latest`\n- `ask_deepseek-coder:1.3b`\n- `ask_yi-coder:1.5b`\n- `ask_qwen2.5-coder:1.5b`\n- `ask_functiongemma:270m`\n- and a few others.\n\nIf you’d like me to ask one of those models a “How are you?” question, just let me know which one, and I’ll invoke it for you. Alternatively, if you have access to a `gemma2:2b` model elsewhere, you can run it yourself."
+
+[20:39:28.561] === ASSISTANT ===
+I’m not able to call a tool named `ask_gemma2:2b` because that tool isn’t defined in the current toolset. The available “ask_*” helpers are:
+
+- `ask_gpt-oss:latest`
+- `ask_phi:2.7b`
+- `ask_deepseek-r1:1.5b`
+- `ask_command-r:latest`
+- `ask_deepseek-coder:1.3b`
+- `ask_yi-coder:1.5b`
+- `ask_qwen2.5-coder:1.5b`
+- `ask_functiongemma:270m`
+- and a few others.
+
+If you’d like me to ask one of those models a “How are you?” question, just let me know which one, and I’ll invoke it for you. Alternatively, if you have access to a `gemma2:2b` model elsewhere, you can run it yourself.
+[20:39:28.561] STATUS: agent.Chat successful, content length: 592, tool calls: 0
+[20:39:28.561] STATUS: Received response: err=<nil>, tool_calls=0, content_len=592
+[20:39:28.561] STATUS: Adding 0 tool calls to messages
+[20:39:28.561] STATUS: Adding assistant response, length: 592
+[20:39:28.561] STATUS: Updating viewport, total messages: 4
+[20:40:02.001] STATUS: Starting agent.Chat call
+[20:40:02.001] Agent.Chat: Starting chat with message: "Try any other as you wish, I'm just testing the tool system."
+
+[20:40:02.001] === USER ===
+Try any other as you wish, I'm just testing the tool system.
+[20:40:02.001] Agent.Chat: Iteration 1/10
+[20:40:02.001] performChat: Using model "gpt-oss:latest" with tool format "text"
+[20:40:02.001] performChat: Message count: 4
+[20:40:18.673] Agent.Chat: Got response from model, content length: 0
+[20:40:18.673] Agent.Chat: Response content: ""
+
+[20:40:18.673] === ASSISTANT ===
+
+[20:40:18.673] STATUS: agent.Chat successful, content length: 0, tool calls: 0
+[20:40:18.673] STATUS: Received response: err=<nil>, tool_calls=0, content_len=0
+[20:40:18.673] STATUS: Adding 0 tool calls to messages
+[20:40:18.673] STATUS: No assistant content to add
+[20:40:18.673] STATUS: Updating viewport, total messages: 5
