@@ -360,3 +360,29 @@ func (c *ToolsCommand) Execute(ctx context.Context, args []string, m *chatModel)
 
 	return sb.String(), nil
 }
+
+// ClearQueueCommand
+type ClearQueueCommand struct{}
+
+func NewClearQueueCommand() *ClearQueueCommand {
+	return &ClearQueueCommand{}
+}
+
+func (c *ClearQueueCommand) Name() string {
+	return "clear-queue"
+}
+
+func (c *ClearQueueCommand) Description() string {
+	return "Clear all queued messages"
+}
+
+func (c *ClearQueueCommand) Execute(ctx context.Context, args []string, m *chatModel) (string, error) {
+	count := len(m.messageQueue)
+	m.messageQueue = nil
+
+	if count == 0 {
+		return "Queue is already empty.", nil
+	}
+
+	return fmt.Sprintf("✓ Cleared %d queued message(s).", count), nil
+}

@@ -18,9 +18,10 @@ type Client struct {
 }
 
 type Message struct {
-	Role     string `json:"role"`
-	Content  string `json:"content"`
-	ToolName string `json:"tool_name,omitempty"` // Required for tool result messages
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolName  string     `json:"tool_name,omitempty"`  // Required for tool result messages
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // Tool calls from assistant
 }
 
 type Tool struct {
@@ -42,11 +43,10 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
-	Model     string     `json:"model"`
-	CreatedAt time.Time  `json:"created_at"`
-	Message   Message    `json:"message"`
-	Done      bool       `json:"done"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Model     string    `json:"model"`
+	CreatedAt time.Time `json:"created_at"`
+	Message   Message   `json:"message"`
+	Done      bool      `json:"done"`
 }
 
 type ToolCall struct {

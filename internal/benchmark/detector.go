@@ -99,7 +99,7 @@ func (d *Detector) testNativeTools(ctx context.Context, modelName string) bool {
 		return false
 	}
 
-	return len(resp.ToolCalls) > 0
+	return len(resp.Message.ToolCalls) > 0
 }
 
 func (d *Detector) testXMLFormat(ctx context.Context, modelName string) bool {

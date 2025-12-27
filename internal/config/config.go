@@ -28,12 +28,22 @@ type MCPServerConfig struct {
 }
 
 type PermissionConfig struct {
-	AutoApproveSafe        bool     `json:"auto_approve_safe"`
-	AutoApproveRead        bool     `json:"auto_approve_read"`
-	RequireApprovalWrite   bool     `json:"require_approval_write"`
-	RequireApprovalExecute bool     `json:"require_approval_execute"`
-	RequireApprovalNetwork bool     `json:"require_approval_network"`
-	BlockedCommands        []string `json:"blocked_commands"`
+	AutoApproveSafe        bool                `json:"auto_approve_safe"`
+	AutoApproveRead        bool                `json:"auto_approve_read"`
+	RequireApprovalWrite   bool                `json:"require_approval_write"`
+	RequireApprovalExecute bool                `json:"require_approval_execute"`
+	RequireApprovalNetwork bool                `json:"require_approval_network"`
+	BlockedCommands        []string            `json:"blocked_commands"`
+	AlwaysAllowPatterns    []PermissionPattern `json:"always_allow_patterns,omitempty"`
+	RestrictToWorkingDir   bool                `json:"restrict_to_working_dir"`
+}
+
+type PermissionPattern struct {
+	Tool           string `json:"tool"`                      // Tool name (e.g., "run_command", "read_file")
+	PathPattern    string `json:"path_pattern,omitempty"`    // Glob pattern (e.g., "/home/user/project/**", "*.txt")
+	CommandPattern string `json:"command_pattern,omitempty"` // Command prefix for run_command (e.g., "ls", "git status")
+	AlwaysAllow    bool   `json:"always_allow,omitempty"`    // If true, always allow this tool regardless of path/command
+	Enabled        bool   `json:"enabled"`
 }
 
 type ModelAsTool struct {

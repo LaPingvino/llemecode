@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/sys/unix"
 )
 
 type chatModel struct {
@@ -43,6 +44,18 @@ type chatModel struct {
 	searchResults        []int           // Indices in history matching search
 	searchIndex          int             // Current position in search results
 	statusMessage        string          // Current status message from logger
+
+	// Async task management
+	currentTask      context.CancelFunc // Cancel function for current task
+	messageQueue     []string           // Messages queued while task is running
+	processingStatus string             // Current processing status (e.g., "Thinking...", "Running command...")
+
+	// Permission handling
+	pendingPermission *permissionRequest // Current permission request awaiting response
+	permissionMode    bool               // True when waiting for y/n input
+
+	// Command execution overlay
+	activeCommands []*commandExecution // Currently running/recent commands
 }
 
 type message struct {
@@ -58,6 +71,32 @@ type responseMsg struct {
 
 type statusMsg struct {
 	message string
+}
+
+// Command execution tracking
+type commandExecution struct {
+	id       string   // Unique ID for this command
+	command  string   // The command being executed
+	output   []string // Lines of output
+	running  bool     // Whether still executing
+	exitCode int      // Exit code when done
+	err      error    // Error if any
+}
+
+type commandStartMsg struct {
+	id      string
+	command string
+}
+
+type commandOutputMsg struct {
+	id   string
+	line string
+}
+
+type commandEndMsg struct {
+	id       string
+	exitCode int
+	err      error
 }
 
 var (
@@ -119,6 +158,7 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 	cmdRegistry.Register(NewDisableToolCommand(cfg, toolRegistry))
 	cmdRegistry.Register(NewListDisabledToolsCommand(cfg))
 	cmdRegistry.Register(NewTestToolCommand(toolRegistry))
+	cmdRegistry.Register(NewClearQueueCommand())
 
 	ta := textarea.New()
 	ta.Placeholder = "Type your message or /help for commands..."
@@ -168,6 +208,24 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
+	// Update tool registry to use inline permission checker and command executor
+	// This replaces the default ChatPermissionChecker with one integrated into the UI
+	toolRegistry.SetPermissionChecker(NewInlineChatPermissionChecker(p))
+
+	// Set inline command executor for run_command tool
+	// This streams command output to the UI instead of using a separate window
+	inlineExecutor := NewInlineCommandExecutor(p)
+	for _, tool := range toolRegistry.All() {
+		if tool.Name() == "run_command" {
+			if pt, ok := tool.(*tools.ProtectedTool); ok {
+				if bashTool, ok := pt.UnwrapTool().(*tools.BashTool); ok {
+					bashTool.SetExecutor(inlineExecutor)
+				}
+			}
+			break
+		}
+	}
+
 	// Set up logger status updater to send status messages to the TUI (non-blocking)
 	logger.SetStatusUpdater(func(msg string) {
 		// Use goroutine to prevent blocking
@@ -193,6 +251,54 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle permission mode first - y/n/c/p/a input
+		if m.permissionMode && m.pendingPermission != nil {
+			switch msg.String() {
+			case "y", "Y":
+				m.pendingPermission.response <- permissionResponse{approved: true}
+				close(m.pendingPermission.response)
+				m.pendingPermission = nil
+				m.permissionMode = false
+				return m, nil
+			case "n", "N":
+				m.pendingPermission.response <- permissionResponse{approved: false}
+				close(m.pendingPermission.response)
+				m.pendingPermission = nil
+				m.permissionMode = false
+				return m, nil
+			case "a", "A":
+				// Always allow this tool (no restrictions)
+				m.pendingPermission.response <- permissionResponse{approved: true, alwaysTool: true}
+				close(m.pendingPermission.response)
+				m.pendingPermission = nil
+				m.permissionMode = false
+				return m, nil
+			case "c", "C":
+				// For run_command: always allow this specific command
+				m.pendingPermission.response <- permissionResponse{approved: true, alwaysCommand: true}
+				close(m.pendingPermission.response)
+				m.pendingPermission = nil
+				m.permissionMode = false
+				return m, nil
+			case "p", "P":
+				// Always allow when using this path/directory
+				m.pendingPermission.response <- permissionResponse{approved: true, alwaysPath: true}
+				close(m.pendingPermission.response)
+				m.pendingPermission = nil
+				m.permissionMode = false
+				return m, nil
+			case "esc":
+				// Deny on escape
+				m.pendingPermission.response <- permissionResponse{approved: false}
+				close(m.pendingPermission.response)
+				m.pendingPermission = nil
+				m.permissionMode = false
+				return m, nil
+			}
+			// Ignore other keys in permission mode
+			return m, nil
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			// Exit search mode on Ctrl-C if in search mode
@@ -213,6 +319,56 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchIndex = 0
 				return m, nil
 			}
+
+			// If currently processing and there's a queued message or typed input, interrupt and send
+			if m.waiting && m.currentTask != nil {
+				// Cancel current task
+				m.currentTask()
+				m.currentTask = nil
+
+				// Get first queued message or current input
+				var interruptMsg string
+				if len(m.messageQueue) > 0 {
+					interruptMsg = m.messageQueue[0]
+					m.messageQueue = m.messageQueue[1:]
+				} else {
+					interruptMsg = m.textarea.Value()
+					m.textarea.Reset()
+				}
+
+				if interruptMsg != "" {
+					// Add to history
+					if len(m.history) == 0 || m.history[len(m.history)-1] != interruptMsg {
+						m.history = append(m.history, interruptMsg)
+					}
+					m.historyIndex = -1
+
+					// Add interrupted notice
+					m.messages = append(m.messages, message{
+						role:    "system",
+						content: "⚠️ Previous task interrupted",
+					})
+
+					// Send new message
+					m.messages = append(m.messages, message{role: "user", content: interruptMsg})
+					m.updateViewport()
+
+					return m, tea.Batch(
+						m.spinner.Tick,
+						m.chat(interruptMsg),
+					)
+				}
+
+				// Just cancel without new message
+				m.waiting = false
+				m.messages = append(m.messages, message{
+					role:    "system",
+					content: "⚠️ Task cancelled",
+				})
+				m.updateViewport()
+				return m, nil
+			}
+
 			return m, tea.Quit
 		case tea.KeyCtrlR:
 			// Toggle reverse search mode
@@ -262,19 +418,19 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchIndex = 0
 				return m, nil
 			}
-			if !m.waiting && m.textarea.Value() != "" {
+
+			if m.textarea.Value() != "" {
 				userMsg := m.textarea.Value()
-
-				// Add to history (avoid duplicates of last entry)
-				if len(m.history) == 0 || m.history[len(m.history)-1] != userMsg {
-					m.history = append(m.history, userMsg)
-				}
-				m.historyIndex = -1
-
 				m.textarea.Reset()
 
-				// Check if it's a command
+				// Check if it's a command - execute immediately even if waiting
 				if result, isCmd, err := m.commands.Execute(m.ctx, userMsg, &m); isCmd {
+					// Add to history
+					if len(m.history) == 0 || m.history[len(m.history)-1] != userMsg {
+						m.history = append(m.history, userMsg)
+					}
+					m.historyIndex = -1
+
 					if err != nil {
 						m.messages = append(m.messages, message{
 							role:    "error",
@@ -290,9 +446,23 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
+				// If currently waiting, queue the message instead of sending
+				if m.waiting {
+					m.messageQueue = append(m.messageQueue, userMsg)
+					m.updateViewport() // Update to show queued message indicator
+					return m, nil
+				}
+
+				// Add to history (avoid duplicates of last entry)
+				if len(m.history) == 0 || m.history[len(m.history)-1] != userMsg {
+					m.history = append(m.history, userMsg)
+				}
+				m.historyIndex = -1
+
 				// Regular chat message
 				m.messages = append(m.messages, message{role: "user", content: userMsg})
 				m.waiting = true
+				m.processingStatus = "Thinking..."
 				m.updateViewport()
 				return m, tea.Batch(
 					m.spinner.Tick,
@@ -349,9 +519,57 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.statusMessage = msg.message
 
+	case permissionRequestMsg:
+		// Store the permission request and enter permission mode
+		m.pendingPermission = msg.request
+		m.permissionMode = true
+		m.processingStatus = "Awaiting permission..."
+		return m, nil
+
+	case commandStartMsg:
+		// Start tracking a new command
+		cmd := &commandExecution{
+			id:      msg.id,
+			command: msg.command,
+			output:  []string{},
+			running: true,
+		}
+		m.activeCommands = append(m.activeCommands, cmd)
+		return m, nil
+
+	case commandOutputMsg:
+		// Add output line to the appropriate command
+		for _, cmd := range m.activeCommands {
+			if cmd.id == msg.id {
+				cmd.output = append(cmd.output, msg.line)
+				break
+			}
+		}
+		return m, nil
+
+	case commandEndMsg:
+		// Mark command as finished
+		for _, cmd := range m.activeCommands {
+			if cmd.id == msg.id {
+				cmd.running = false
+				cmd.exitCode = msg.exitCode
+				cmd.err = msg.err
+
+				// Remove from active list after a short delay (keep for viewing)
+				// For now, we'll keep the last 3 commands
+				if len(m.activeCommands) > 3 {
+					m.activeCommands = m.activeCommands[1:]
+				}
+				break
+			}
+		}
+		return m, nil
+
 	case responseMsg:
 		logger.Status("Received response: err=%v, tool_calls=%d, content_len=%d", msg.err, len(msg.toolCalls), len(msg.content))
 		m.waiting = false
+		m.processingStatus = ""
+
 		if msg.err != nil {
 			logger.Status("Processing error: %v", msg.err)
 			m.err = msg.err
@@ -384,12 +602,33 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		logger.Status("Updating viewport, total messages: %d", len(m.messages))
 		m.updateViewport()
+
+		// If there are queued messages, send the first one
+		if len(m.messageQueue) > 0 {
+			queuedMsg := m.messageQueue[0]
+			m.messageQueue = m.messageQueue[1:]
+
+			// Add to history
+			if len(m.history) == 0 || m.history[len(m.history)-1] != queuedMsg {
+				m.history = append(m.history, queuedMsg)
+			}
+
+			// Send the queued message
+			m.messages = append(m.messages, message{role: "user", content: queuedMsg})
+			m.waiting = true
+			m.processingStatus = "Thinking..."
+			m.updateViewport()
+
+			return m, tea.Batch(
+				m.spinner.Tick,
+				m.chat(queuedMsg),
+			)
+		}
 	}
 
-	if !m.waiting {
-		m.textarea, cmd = m.textarea.Update(msg)
-		cmds = append(cmds, cmd)
-	}
+	// Always allow textarea updates so user can type anytime
+	m.textarea, cmd = m.textarea.Update(msg)
+	cmds = append(cmds, cmd)
 
 	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
@@ -400,36 +639,164 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m chatModel) View() string {
 	var s strings.Builder
 
-	// Header with memory indicator
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-	memMB := float64(memStats.Alloc) / 1024 / 1024
-
-	// Determine memory color based on usage
-	memColor := "42" // Green
-	if memMB > 500 {
-		memColor = "196" // Red
-	} else if memMB > 200 {
-		memColor = "214" // Orange
-	}
-
-	memIndicator := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(memColor)).
-		Render(fmt.Sprintf(" [%.1f MB]", memMB))
-
-	header := headerStyle.Render(fmt.Sprintf("💬 Llemecode Chat - Model: %s", m.agent.GetMessages()[0].Role)) + memIndicator
+	// Header without memory indicator (moved to bottom)
+	header := headerStyle.Render(fmt.Sprintf("💬 Llemecode Chat - Model: %s", m.agent.GetMessages()[0].Role))
 	s.WriteString(header + "\n\n")
 
 	// Viewport with messages
 	s.WriteString(m.viewport.View() + "\n\n")
 
+	// Permission prompt (if active)
+	if m.permissionMode && m.pendingPermission != nil {
+		permBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("214")).
+			Padding(1, 2).
+			Width(m.width - 8)
+
+		levelStr := ""
+		levelColor := "214"
+
+		switch m.pendingPermission.level {
+		case tools.PermissionExecute:
+			levelStr = "⚠️  EXECUTE"
+			levelColor = "196"
+		case tools.PermissionWrite:
+			levelStr = "⚠️  WRITE"
+			levelColor = "214"
+		case tools.PermissionNetwork:
+			levelStr = "🌐 NETWORK"
+			levelColor = "214"
+		case tools.PermissionRead:
+			levelStr = "📖 READ"
+			levelColor = "111"
+		}
+
+		permContent := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(levelColor)).
+			Bold(true).
+			Render(fmt.Sprintf("%s PERMISSION REQUIRED\n\n", levelStr))
+
+		permContent += fmt.Sprintf("Tool: %s\n", m.pendingPermission.toolName)
+		permContent += fmt.Sprintf("Details: %s\n", m.pendingPermission.details)
+
+		// Show target path if available
+		if m.pendingPermission.targetPath != "" {
+			permContent += fmt.Sprintf("Target: %s\n", m.pendingPermission.targetPath)
+		}
+
+		permContent += "\n"
+		permContent += lipgloss.NewStyle().
+			Foreground(lipgloss.Color("42")).
+			Render("Allow this operation?\n")
+
+		// Different options based on tool type
+		if m.pendingPermission.toolName == "run_command" {
+			if m.pendingPermission.targetPath != "" {
+				permContent += lipgloss.NewStyle().
+					Foreground(lipgloss.Color("111")).
+					Render("  y: yes (once)  n: no  c: always allow command  p: always on this path")
+			} else {
+				permContent += lipgloss.NewStyle().
+					Foreground(lipgloss.Color("111")).
+					Render("  y: yes (once)  n: no  a: always allow  c: always allow command")
+			}
+		} else if m.pendingPermission.targetPath != "" {
+			// For file tools with path
+			permContent += lipgloss.NewStyle().
+				Foreground(lipgloss.Color("111")).
+				Render("  y: yes (once)  n: no  a: always allow  p: always on this path")
+		} else {
+			// Tools without path - only offer "a" for always
+			permContent += lipgloss.NewStyle().
+				Foreground(lipgloss.Color("111")).
+				Render("  y: yes (once)  n: no  a: always allow")
+		}
+
+		s.WriteString(permBox.Render(permContent) + "\n\n")
+	}
+
+	// Command execution overlay (show running/recent commands)
+	if len(m.activeCommands) > 0 {
+		for _, cmd := range m.activeCommands {
+			cmdBox := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("205")).
+				Padding(0, 1).
+				Width(m.width - 8)
+
+			// Command header
+			status := "⚡ Running"
+			statusColor := "214"
+			if !cmd.running {
+				if cmd.exitCode == 0 {
+					status = "✓ Completed"
+					statusColor = "42"
+				} else {
+					status = "✗ Failed"
+					statusColor = "196"
+				}
+			}
+
+			cmdHeader := lipgloss.NewStyle().
+				Foreground(lipgloss.Color(statusColor)).
+				Bold(true).
+				Render(fmt.Sprintf("%s: %s\n", status, cmd.command))
+
+			// Output (last 10 lines)
+			outputLines := cmd.output
+			if len(outputLines) > 10 {
+				outputLines = outputLines[len(outputLines)-10:]
+			}
+
+			cmdOutput := ""
+			if len(outputLines) > 0 {
+				cmdOutput = "\n" + strings.Join(outputLines, "\n")
+			}
+
+			// Exit code if finished
+			exitInfo := ""
+			if !cmd.running {
+				if cmd.err != nil {
+					exitInfo = fmt.Sprintf("\nExit code: %d (error: %v)", cmd.exitCode, cmd.err)
+				} else {
+					exitInfo = fmt.Sprintf("\nExit code: %d", cmd.exitCode)
+				}
+			}
+
+			s.WriteString(cmdBox.Render(cmdHeader+cmdOutput+exitInfo) + "\n\n")
+		}
+	}
+
 	// Status line
 	if m.waiting {
-		waitMsg := "Thinking..."
+		waitMsg := m.processingStatus
+		if waitMsg == "" {
+			waitMsg = "Thinking..."
+		}
 		if m.activeBackgroundTask != "" {
 			waitMsg = fmt.Sprintf("Running: %s...", m.activeBackgroundTask)
 		}
-		s.WriteString(m.spinner.View() + " " + waitMsg + "\n")
+		statusLine := m.spinner.View() + " " + waitMsg
+
+		// Show queued messages indicator
+		if len(m.messageQueue) > 0 {
+			queueInfo := fmt.Sprintf(" | ⏸ Queue: %d msg", len(m.messageQueue))
+			if len(m.messageQueue) > 1 {
+				queueInfo += "s"
+			}
+			// Show preview of first queued message
+			queuePreview := m.messageQueue[0]
+			if len(queuePreview) > 30 {
+				queuePreview = queuePreview[:27] + "..."
+			}
+			queueInfo += fmt.Sprintf(" (%s) | Esc: interrupt", queuePreview)
+
+			statusLine += lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Render(queueInfo)
+		}
+		s.WriteString(statusLine + "\n")
 	} else if m.err != nil {
 		s.WriteString(errorStyle.Render(fmt.Sprintf("⚠ %v", m.err)) + "\n")
 	} else if m.statusMessage != "" {
@@ -480,18 +847,56 @@ func (m chatModel) View() string {
 	// Textarea
 	s.WriteString(m.textarea.View() + "\n")
 
-	// Help
+	// Help line with RAM indicator
 	var help string
+	memIndicator := m.getMemoryIndicator()
+
 	if m.searchMode {
 		help = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			Render("Ctrl+N: next • Ctrl+P: prev • Enter: use • Esc: cancel")
+	} else if m.permissionMode {
+		// Context-aware help based on tool and available options
+		if m.pendingPermission != nil {
+			if m.pendingPermission.toolName == "run_command" {
+				if m.pendingPermission.targetPath != "" {
+					help = lipgloss.NewStyle().
+						Foreground(lipgloss.Color("241")).
+						Render("y: once • n: deny • c: always this cmd • p: always this path • Esc: deny")
+				} else {
+					help = lipgloss.NewStyle().
+						Foreground(lipgloss.Color("241")).
+						Render("y: once • n: deny • a: always allow tool • c: always this cmd • Esc: deny")
+				}
+			} else if m.pendingPermission.targetPath != "" {
+				help = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("241")).
+					Render("y: once • n: deny • a: always allow tool • p: always this path • Esc: deny")
+			} else {
+				help = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("241")).
+					Render("y: once • n: deny • a: always allow tool • Esc: deny")
+			}
+		} else {
+			help = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("241")).
+				Render("y: approve • n: deny • Esc: deny")
+		}
+	} else if m.waiting && len(m.messageQueue) > 0 {
+		help = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Render("Esc: interrupt and send next queued • /clear-queue to clear")
+	} else if m.waiting {
+		help = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Render("Enter: queue message • /cmd: runs immediately • Esc: interrupt")
 	} else {
 		help = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			Render("Enter: send • ↑↓: history • Ctrl+R: search • Esc: quit")
 	}
-	s.WriteString("\n" + help)
+
+	s.WriteString("\n" + help + " " + memIndicator)
 
 	return s.String()
 }
@@ -532,11 +937,24 @@ func (m *chatModel) updateViewport() {
 	m.viewport.GotoBottom()
 }
 
-func (m chatModel) chat(userMsg string) tea.Cmd {
+func (m *chatModel) chat(userMsg string) tea.Cmd {
 	return func() tea.Msg {
+		// Create cancellable context for this chat
+		taskCtx, cancel := context.WithCancel(m.ctx)
+		m.currentTask = cancel
+
 		logger.Status("Starting agent.Chat call")
-		resp, err := m.agent.Chat(m.ctx, userMsg)
+		resp, err := m.agent.Chat(taskCtx, userMsg)
+
+		// Clear the task when done
+		m.currentTask = nil
+
 		if err != nil {
+			// Check if it was cancelled
+			if taskCtx.Err() == context.Canceled {
+				logger.Status("agent.Chat was cancelled")
+				return responseMsg{err: fmt.Errorf("task cancelled")}
+			}
 			logger.Status("agent.Chat returned error: %v", err)
 			return responseMsg{err: err}
 		}
@@ -565,6 +983,39 @@ func (m *chatModel) updateSearchResults() {
 	if len(m.searchResults) > 0 {
 		m.searchIndex = 0
 	}
+}
+
+// getMemoryIndicator returns a formatted memory usage indicator showing system memory
+func (m *chatModel) getMemoryIndicator() string {
+	// Get system memory info
+	var sysinfo unix.Sysinfo_t
+	if err := unix.Sysinfo(&sysinfo); err != nil {
+		// Fallback to process memory if system info unavailable
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+		memMB := float64(memStats.Alloc) / 1024 / 1024
+		return lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Render(fmt.Sprintf("[%.1f MB]", memMB))
+	}
+
+	// Calculate total and used memory in GB
+	totalGB := float64(sysinfo.Totalram*uint64(sysinfo.Unit)) / 1024 / 1024 / 1024
+	freeGB := float64(sysinfo.Freeram*uint64(sysinfo.Unit)) / 1024 / 1024 / 1024
+	usedGB := totalGB - freeGB
+	usagePercent := (usedGB / totalGB) * 100
+
+	// Determine color based on usage percentage
+	memColor := "42" // Green
+	if usagePercent > 90 {
+		memColor = "196" // Red
+	} else if usagePercent > 75 {
+		memColor = "214" // Orange
+	}
+
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(memColor)).
+		Render(fmt.Sprintf("[%.1f/%.1f GB %.0f%%]", usedGB, totalGB, usagePercent))
 }
 
 // updateAgentDisabledTools updates the agent with the combined list of disabled tools

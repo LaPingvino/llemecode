@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -34,7 +35,7 @@ type CommandWindow struct {
 	err       error
 }
 
-type commandOutputMsg struct {
+type oldCommandOutputMsg struct {
 	output string
 }
 
@@ -141,7 +142,7 @@ func (cw *CommandWindow) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cw.viewport.Height = msg.Height - 12
 		cw.inputArea.SetWidth(msg.Width - 4)
 
-	case commandOutputMsg:
+	case oldCommandOutputMsg:
 		cw.appendOutput(msg.output)
 		if cw.running {
 			cmds = append(cmds, cw.waitForOutput())
@@ -342,4 +343,114 @@ func (sce *SimpleCommandExecutor) Execute(ctx context.Context, command string) (
 	}
 
 	return string(outputBytes), exitCode, err
+}
+
+// InlineCommandExecutor executes commands and streams output to the chat UI
+type InlineCommandExecutor struct {
+	program *tea.Program
+}
+
+func NewInlineCommandExecutor(program *tea.Program) *InlineCommandExecutor {
+	return &InlineCommandExecutor{
+		program: program,
+	}
+}
+
+func (ice *InlineCommandExecutor) Execute(ctx context.Context, command string) (output string, exitCode int, err error) {
+	// Generate unique ID for this command
+	id := fmt.Sprintf("cmd_%d", time.Now().UnixNano())
+
+	// Notify UI that command is starting
+	ice.program.Send(commandStartMsg{
+		id:      id,
+		command: command,
+	})
+
+	// Execute command
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+
+	// Capture stdout and stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		ice.program.Send(commandEndMsg{
+			id:       id,
+			exitCode: -1,
+			err:      err,
+		})
+		return "", -1, err
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		ice.program.Send(commandEndMsg{
+			id:       id,
+			exitCode: -1,
+			err:      err,
+		})
+		return "", -1, err
+	}
+
+	// Start command
+	if err := cmd.Start(); err != nil {
+		ice.program.Send(commandEndMsg{
+			id:       id,
+			exitCode: -1,
+			err:      err,
+		})
+		return "", -1, err
+	}
+
+	// Stream output
+	var outputBuilder strings.Builder
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Stream stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputBuilder.WriteString(line + "\n")
+			ice.program.Send(commandOutputMsg{
+				id:   id,
+				line: line,
+			})
+		}
+	}()
+
+	// Stream stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := "stderr: " + scanner.Text()
+			outputBuilder.WriteString(line + "\n")
+			ice.program.Send(commandOutputMsg{
+				id:   id,
+				line: line,
+			})
+		}
+	}()
+
+	// Wait for output streaming to finish
+	wg.Wait()
+
+	// Wait for command to finish
+	err = cmd.Wait()
+	exitCode = 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	// Notify UI that command finished
+	ice.program.Send(commandEndMsg{
+		id:       id,
+		exitCode: exitCode,
+		err:      err,
+	})
+
+	return outputBuilder.String(), exitCode, err
 }

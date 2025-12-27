@@ -222,9 +222,9 @@ func (a *Agent) performChat(ctx context.Context) (*ollama.ChatResponse, error) {
 
 func (a *Agent) extractToolCalls(resp *ollama.ChatResponse) []ollama.ToolCall {
 
-	// Native tool calls
-	if len(resp.ToolCalls) > 0 {
-		return resp.ToolCalls
+	// Native tool calls (from message.tool_calls)
+	if len(resp.Message.ToolCalls) > 0 {
+		return resp.Message.ToolCalls
 	}
 
 	// Parse fallback formats

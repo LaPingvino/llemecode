@@ -67,6 +67,15 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]int
 	return tool.Execute(ctx, args)
 }
 
+// SetPermissionChecker updates the permission checker for all ProtectedTool instances in the registry
+func (r *Registry) SetPermissionChecker(checker PermissionChecker) {
+	for _, tool := range r.tools {
+		if pt, ok := tool.(*ProtectedTool); ok {
+			pt.SetChecker(checker)
+		}
+	}
+}
+
 type ErrToolNotFound struct {
 	Name string
 }
