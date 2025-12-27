@@ -124,7 +124,14 @@ func (bb *BackgroundBenchmark) run() {
 		return
 	}
 
-	configDir, _ := config.GetConfigDir()
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		bb.mu.Lock()
+		bb.progress = fmt.Sprintf("Failed to get config dir: %v", err)
+		bb.mu.Unlock()
+		return
+	}
+
 	resultsPath := configDir + "/benchmark_results.json"
 	if err := bb.benchmarker.SaveResults(allScores, resultsPath); err != nil {
 		bb.mu.Lock()
@@ -160,7 +167,12 @@ func (bb *BackgroundBenchmark) savePartialResults() {
 	}
 
 	// Save partial benchmark results
-	configDir, _ := config.GetConfigDir()
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		bb.progress = fmt.Sprintf("Failed to get config dir: %v", err)
+		return
+	}
+
 	resultsPath := configDir + "/benchmark_results_partial.json"
 	if err := bb.benchmarker.SaveResults(scores, resultsPath); err != nil {
 		bb.progress = fmt.Sprintf("Failed to save partial results: %v", err)

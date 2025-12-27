@@ -232,8 +232,12 @@ func (t *ListCustomToolsTool) Execute(ctx context.Context, args map[string]inter
 
 	result := "Custom Tools:\n\n"
 	for _, toolData := range t.config.CustomTools {
-		jsonData, _ := json.MarshalIndent(toolData, "", "  ")
-		result += string(jsonData) + "\n\n"
+		jsonData, err := json.MarshalIndent(toolData, "", "  ")
+		if err != nil {
+			result += fmt.Sprintf("(error formatting tool data: %v)\n\n", err)
+		} else {
+			result += string(jsonData) + "\n\n"
+		}
 	}
 
 	return result, nil

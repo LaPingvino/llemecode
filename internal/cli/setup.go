@@ -90,8 +90,12 @@ func RunSetup(ctx context.Context, client *ollama.Client, cfg *config.Config) er
 		m.benchmarker.UpdateConfig(cfg, scores)
 
 		// Save config
-		configDir, _ := config.GetConfigDir()
-		progressCh <- fmt.Sprintf("\nSaving configuration to %s", configDir)
+		configDir, err := config.GetConfigDir()
+		if err != nil {
+			progressCh <- fmt.Sprintf("Warning: Could not get config dir: %v", err)
+		} else {
+			progressCh <- fmt.Sprintf("\nSaving configuration to %s", configDir)
+		}
 
 		if err := cfg.Save(); err != nil {
 			p.Send(doneMsg{err: err})

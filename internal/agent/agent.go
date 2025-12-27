@@ -83,8 +83,12 @@ func (a *Agent) generateToolDescriptions() string {
 	var sb strings.Builder
 	for _, tool := range a.toolRegistry.AllFiltered(a.disabledTools) {
 		sb.WriteString(fmt.Sprintf("\n- %s: %s\n", tool.Name(), tool.Description()))
-		params, _ := json.MarshalIndent(tool.Parameters(), "  ", "  ")
-		sb.WriteString(fmt.Sprintf("  Parameters: %s\n", string(params)))
+		params, err := json.MarshalIndent(tool.Parameters(), "  ", "  ")
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("  Parameters: (error: %v)\n", err))
+		} else {
+			sb.WriteString(fmt.Sprintf("  Parameters: %s\n", string(params)))
+		}
 	}
 	return sb.String()
 }
@@ -208,7 +212,10 @@ func (a *Agent) parseXMLToolCalls(content string) []ollama.ToolCall {
 		var args map[string]interface{}
 		if len(argsMatch) >= 2 {
 			argsJSON := strings.TrimSpace(argsMatch[1])
-			json.Unmarshal([]byte(argsJSON), &args)
+			if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+				// Log parsing error but continue with empty args
+				args = make(map[string]interface{})
+			}
 		}
 
 		if args == nil {
@@ -244,10 +251,14 @@ func (a *Agent) parseJSONToolCalls(content string) []ollama.ToolCall {
 		}
 
 		if toolCallData, ok := data["tool_call"].(map[string]interface{}); ok {
-			name, _ := toolCallData["name"].(string)
-			args, _ := toolCallData["arguments"].(map[string]interface{})
+			name, nameOk := toolCallData["name"].(string)
+			args, argsOk := toolCallData["arguments"].(map[string]interface{})
 
-			if args == nil {
+			if !nameOk {
+				continue // Skip if name is missing
+			}
+
+			if !argsOk || args == nil {
 				args = make(map[string]interface{})
 			}
 
@@ -283,7 +294,10 @@ func (a *Agent) parseTextToolCalls(content string) []ollama.ToolCall {
 					argsJSON := strings.TrimSpace(strings.TrimPrefix(nextLine, "ARGS:"))
 
 					var args map[string]interface{}
-					json.Unmarshal([]byte(argsJSON), &args)
+					if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+						// Log parsing error but continue with empty args
+						args = make(map[string]interface{})
+					}
 
 					if args == nil {
 						args = make(map[string]interface{})
@@ -349,8 +363,13 @@ func (a *Agent) ClearHistory() {
 }
 
 func FormatToolCall(tc ToolExecution) string {
-	argsJSON, _ := json.MarshalIndent(tc.Args, "", "  ")
-	result := fmt.Sprintf("🔧 Tool: %s\nArguments:\n%s\n", tc.Name, string(argsJSON))
+	argsJSON, err := json.MarshalIndent(tc.Args, "", "  ")
+	argsStr := string(argsJSON)
+	if err != nil {
+		argsStr = fmt.Sprintf("(error formatting args: %v)", err)
+	}
+
+	result := fmt.Sprintf("🔧 Tool: %s\nArguments:\n%s\n", tc.Name, argsStr)
 
 	if tc.Error != nil {
 		result += fmt.Sprintf("❌ Error: %v\n", tc.Error)
