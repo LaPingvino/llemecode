@@ -116,6 +116,7 @@ func (a *Agent) Chat(ctx context.Context, userMessage string) (*Response, error)
 
 		if len(toolCalls) == 0 {
 			// No tool calls - we're done
+			// Collect the final response content (could be just text or text + reasoning about tool results)
 			response.Content = chatResp.Message.Content
 			return &response, nil
 		}
@@ -124,6 +125,9 @@ func (a *Agent) Chat(ctx context.Context, userMessage string) (*Response, error)
 		if err := a.executeToolCalls(ctx, toolCalls, &response); err != nil {
 			return nil, err
 		}
+
+		// After executing tools, continue loop to let LLM respond with the results
+		// The LLM will see the tool results and provide a final answer
 	}
 
 	return nil, fmt.Errorf("max iterations reached without completion")
@@ -315,7 +319,8 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ollama.ToolCal
 		response.ToolCalls = append(response.ToolCalls, execution)
 
 		toolResultMsg := ollama.Message{
-			Role: "tool",
+			Role:     "tool",
+			ToolName: toolCall.Function.Name, // Required by Ollama API
 		}
 
 		if err != nil {

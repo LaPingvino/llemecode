@@ -18,8 +18,9 @@ type Client struct {
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role     string `json:"role"`
+	Content  string `json:"content"`
+	ToolName string `json:"tool_name,omitempty"` // Required for tool result messages
 }
 
 type Tool struct {
