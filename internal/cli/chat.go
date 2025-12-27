@@ -331,8 +331,11 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case responseMsg:
+		fmt.Printf("[DEBUG] Update: Received responseMsg, err=%v, tool_calls=%d, content_len=%d\n",
+			msg.err, len(msg.toolCalls), len(msg.content))
 		m.waiting = false
 		if msg.err != nil {
+			fmt.Printf("[DEBUG] Update: Processing error: %v\n", msg.err)
 			m.err = msg.err
 			m.messages = append(m.messages, message{
 				role:    "error",
@@ -340,21 +343,28 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			// Add tool calls if any
-			for _, tc := range msg.toolCalls {
+			fmt.Printf("[DEBUG] Update: Adding %d tool calls to messages\n", len(msg.toolCalls))
+			for idx, tc := range msg.toolCalls {
+				formatted := agent.FormatToolCall(tc)
+				fmt.Printf("[DEBUG] Update: Tool call %d formatted, length: %d\n", idx, len(formatted))
 				m.messages = append(m.messages, message{
 					role:    "tool",
-					content: agent.FormatToolCall(tc),
+					content: formatted,
 				})
 			}
 
 			// Add assistant response
 			if msg.content != "" {
+				fmt.Printf("[DEBUG] Update: Adding assistant response, length: %d\n", len(msg.content))
 				m.messages = append(m.messages, message{
 					role:    "assistant",
 					content: msg.content,
 				})
+			} else {
+				fmt.Printf("[DEBUG] Update: No assistant content to add\n")
 			}
 		}
+		fmt.Printf("[DEBUG] Update: Updating viewport, total messages: %d\n", len(m.messages))
 		m.updateViewport()
 	}
 
@@ -501,10 +511,14 @@ func (m *chatModel) updateViewport() {
 
 func (m chatModel) chat(userMsg string) tea.Cmd {
 	return func() tea.Msg {
+		fmt.Printf("[DEBUG] chat: Starting agent.Chat call\n")
 		resp, err := m.agent.Chat(m.ctx, userMsg)
 		if err != nil {
+			fmt.Printf("[DEBUG] chat: agent.Chat returned error: %v\n", err)
 			return responseMsg{err: err}
 		}
+		fmt.Printf("[DEBUG] chat: agent.Chat successful, content length: %d, tool calls: %d\n",
+			len(resp.Content), len(resp.ToolCalls))
 		return responseMsg{
 			content:   resp.Content,
 			toolCalls: resp.ToolCalls,
