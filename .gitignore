@@ -31,3 +31,7 @@ Thumbs.db
 # Build artifacts
 dist/
 build/
+
+# Log files
+*.log
+
