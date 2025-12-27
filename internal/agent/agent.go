@@ -19,6 +19,7 @@ type Agent struct {
 	model          string
 	messages       []ollama.Message
 	toolCallFormat string
+	disabledTools  []string // Combined list of disabled tools (config + session)
 }
 
 type Response struct {
@@ -67,11 +68,10 @@ func (a *Agent) AddSystemPrompt(customPrompt string) {
 		}
 	}
 
-	// Inject tool descriptions for non-native formats
-	if a.toolCallFormat != "native" {
-		toolDesc := a.generateToolDescriptions()
-		prompt = strings.Replace(prompt, "{{TOOLS}}", toolDesc, -1)
-	}
+	// Inject tool descriptions for ALL formats
+	// Even native models benefit from knowing what tools are available
+	toolDesc := a.generateToolDescriptions()
+	prompt = strings.Replace(prompt, "{{TOOLS}}", toolDesc, -1)
 
 	a.messages = append(a.messages, ollama.Message{
 		Role:    "system",
@@ -81,12 +81,17 @@ func (a *Agent) AddSystemPrompt(customPrompt string) {
 
 func (a *Agent) generateToolDescriptions() string {
 	var sb strings.Builder
-	for _, tool := range a.toolRegistry.All() {
+	for _, tool := range a.toolRegistry.AllFiltered(a.disabledTools) {
 		sb.WriteString(fmt.Sprintf("\n- %s: %s\n", tool.Name(), tool.Description()))
 		params, _ := json.MarshalIndent(tool.Parameters(), "  ", "  ")
 		sb.WriteString(fmt.Sprintf("  Parameters: %s\n", string(params)))
 	}
 	return sb.String()
+}
+
+// SetDisabledTools updates the list of disabled tools for this agent
+func (a *Agent) SetDisabledTools(disabledTools []string) {
+	a.disabledTools = disabledTools
 }
 
 func (a *Agent) Chat(ctx context.Context, userMessage string) (*Response, error) {
@@ -134,7 +139,7 @@ func (a *Agent) performChat(ctx context.Context) (*ollama.ChatResponse, error) {
 	// Add tools for native format only
 	if a.toolCallFormat == "native" {
 		ollamaTools := make([]ollama.Tool, 0)
-		for _, tool := range a.toolRegistry.All() {
+		for _, tool := range a.toolRegistry.AllFiltered(a.disabledTools) {
 			ollamaTools = append(ollamaTools, ollama.Tool{
 				Type: "function",
 				Function: ollama.ToolFunction{

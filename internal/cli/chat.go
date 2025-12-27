@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/LaPingvino/llemecode/internal/agent"
@@ -18,17 +19,28 @@ import (
 )
 
 type chatModel struct {
-	agent    *agent.Agent
-	textarea textarea.Model
-	viewport viewport.Model
-	messages []message
-	spinner  spinner.Model
-	waiting  bool
-	err      error
-	ctx      context.Context
-	width    int
-	height   int
-	glamour  *glamour.TermRenderer
+	agent                *agent.Agent
+	textarea             textarea.Model
+	viewport             viewport.Model
+	messages             []message
+	spinner              spinner.Model
+	waiting              bool
+	err                  error
+	ctx                  context.Context
+	width                int
+	height               int
+	glamour              *glamour.TermRenderer
+	bgBenchmark          *BackgroundBenchmark
+	benchmarkDone        bool
+	commands             *CommandRegistry
+	sessionDisabledTools map[string]bool // Session-only disabled tools
+	activeBackgroundTask string          // Name of currently running background task
+	history              []string        // Command history
+	historyIndex         int             // Current position in history (-1 = not browsing)
+	searchMode           bool            // Ctrl-R reverse search mode
+	searchQuery          string          // Current search query
+	searchResults        []int           // Indices in history matching search
+	searchIndex          int             // Current position in search results
 }
 
 type message struct {
@@ -66,13 +78,16 @@ var (
 			Padding(0, 1)
 )
 
-func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, toolRegistry *tools.Registry) error {
+func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, toolRegistry *tools.Registry, bgBenchmark *BackgroundBenchmark) error {
 	model := cfg.DefaultModel
 	if model == "" {
 		return fmt.Errorf("no default model configured. Please run setup first")
 	}
 
 	ag := agent.New(client, toolRegistry, cfg, model)
+
+	// Set disabled tools from config
+	ag.SetDisabledTools(cfg.DisabledTools)
 
 	// Add system prompt
 	if sysPrompt, ok := cfg.SystemPrompts["default"]; ok {
@@ -81,8 +96,25 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 		ag.AddSystemPrompt("")
 	}
 
+	// Setup command registry
+	cmdRegistry := NewCommandRegistry()
+	cmdRegistry.Register(NewHelpCommand(cmdRegistry))
+	cmdRegistry.Register(NewListModelsCommand(client, cfg))
+	cmdRegistry.Register(NewSwitchModelCommand(client, cfg, toolRegistry))
+	cmdRegistry.Register(NewListPromptsCommand(cfg))
+	cmdRegistry.Register(NewResetCommand())
+	cmdRegistry.Register(NewBenchmarkCommand(client, cfg))
+	cmdRegistry.Register(NewConfigCommand())
+	cmdRegistry.Register(NewToolsCommand(toolRegistry))
+	cmdRegistry.Register(NewAddToolCommand(client, cfg, toolRegistry))
+	cmdRegistry.Register(NewAddAllToolsCommand(client, cfg, toolRegistry))
+	cmdRegistry.Register(NewRemoveToolCommand(cfg, toolRegistry))
+	cmdRegistry.Register(NewEnableToolCommand(cfg, toolRegistry))
+	cmdRegistry.Register(NewDisableToolCommand(cfg, toolRegistry))
+	cmdRegistry.Register(NewListDisabledToolsCommand(cfg))
+
 	ta := textarea.New()
-	ta.Placeholder = "Type your message..."
+	ta.Placeholder = "Type your message or /help for commands..."
 	ta.Focus()
 	ta.CharLimit = 4000
 	ta.SetWidth(80)
@@ -104,14 +136,28 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 	}
 
 	m := chatModel{
-		agent:    ag,
-		textarea: ta,
-		viewport: vp,
-		messages: []message{},
-		spinner:  s,
-		ctx:      ctx,
-		glamour:  gr,
+		agent:                ag,
+		textarea:             ta,
+		viewport:             vp,
+		messages:             []message{},
+		spinner:              s,
+		ctx:                  ctx,
+		glamour:              gr,
+		bgBenchmark:          bgBenchmark,
+		commands:             cmdRegistry,
+		sessionDisabledTools: make(map[string]bool),
+		history:              []string{},
+		historyIndex:         -1,
+		searchMode:           false,
 	}
+
+	// Add welcome message
+	welcomeMsg := fmt.Sprintf("Welcome to Llemecode! You are using **%s**.\n\nAvailable commands:\n- `/help` - Show all commands\n- `/model <name>` - Switch model\n- `/models` - List available models\n- `/reset` - Clear conversation\n\nType your message and press Enter to chat.", model)
+	m.messages = append(m.messages, message{
+		role:    "system",
+		content: welcomeMsg,
+	})
+	m.updateViewport()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
@@ -132,19 +178,141 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC:
+			// Exit search mode on Ctrl-C if in search mode
+			if m.searchMode {
+				m.searchMode = false
+				m.searchQuery = ""
+				m.searchResults = nil
+				m.searchIndex = 0
+				return m, nil
+			}
 			return m, tea.Quit
+		case tea.KeyEsc:
+			// Exit search mode on Esc if in search mode
+			if m.searchMode {
+				m.searchMode = false
+				m.searchQuery = ""
+				m.searchResults = nil
+				m.searchIndex = 0
+				return m, nil
+			}
+			return m, tea.Quit
+		case tea.KeyCtrlR:
+			// Toggle reverse search mode
+			if !m.waiting {
+				m.searchMode = !m.searchMode
+				if m.searchMode {
+					m.searchQuery = ""
+					m.searchResults = nil
+					m.searchIndex = 0
+				}
+				return m, nil
+			}
+		case tea.KeyUp:
+			// Navigate history backwards
+			if !m.waiting && !m.searchMode && len(m.history) > 0 {
+				if m.historyIndex == -1 {
+					m.historyIndex = len(m.history)
+				}
+				if m.historyIndex > 0 {
+					m.historyIndex--
+					m.textarea.SetValue(m.history[m.historyIndex])
+				}
+				return m, nil
+			}
+		case tea.KeyDown:
+			// Navigate history forwards
+			if !m.waiting && !m.searchMode && m.historyIndex != -1 {
+				if m.historyIndex < len(m.history)-1 {
+					m.historyIndex++
+					m.textarea.SetValue(m.history[m.historyIndex])
+				} else {
+					m.historyIndex = -1
+					m.textarea.Reset()
+				}
+				return m, nil
+			}
 		case tea.KeyEnter:
+			if m.searchMode {
+				// Exit search mode and use the current result
+				m.searchMode = false
+				if len(m.searchResults) > 0 {
+					m.textarea.SetValue(m.history[m.searchResults[m.searchIndex]])
+					m.historyIndex = m.searchResults[m.searchIndex]
+				}
+				m.searchQuery = ""
+				m.searchResults = nil
+				m.searchIndex = 0
+				return m, nil
+			}
 			if !m.waiting && m.textarea.Value() != "" {
 				userMsg := m.textarea.Value()
-				m.messages = append(m.messages, message{role: "user", content: userMsg})
+
+				// Add to history (avoid duplicates of last entry)
+				if len(m.history) == 0 || m.history[len(m.history)-1] != userMsg {
+					m.history = append(m.history, userMsg)
+				}
+				m.historyIndex = -1
+
 				m.textarea.Reset()
+
+				// Check if it's a command
+				if result, isCmd, err := m.commands.Execute(m.ctx, userMsg, &m); isCmd {
+					if err != nil {
+						m.messages = append(m.messages, message{
+							role:    "error",
+							content: fmt.Sprintf("Command error: %v", err),
+						})
+					} else {
+						m.messages = append(m.messages, message{
+							role:    "system",
+							content: result,
+						})
+					}
+					m.updateViewport()
+					return m, nil
+				}
+
+				// Regular chat message
+				m.messages = append(m.messages, message{role: "user", content: userMsg})
 				m.waiting = true
 				m.updateViewport()
 				return m, tea.Batch(
 					m.spinner.Tick,
 					m.chat(userMsg),
 				)
+			}
+		default:
+			// In search mode, update search query
+			if m.searchMode {
+				switch msg.String() {
+				case "backspace":
+					if len(m.searchQuery) > 0 {
+						m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+						m.updateSearchResults()
+					}
+				case "ctrl+n":
+					// Next search result
+					if len(m.searchResults) > 0 {
+						m.searchIndex = (m.searchIndex + 1) % len(m.searchResults)
+					}
+				case "ctrl+p":
+					// Previous search result
+					if len(m.searchResults) > 0 {
+						m.searchIndex--
+						if m.searchIndex < 0 {
+							m.searchIndex = len(m.searchResults) - 1
+						}
+					}
+				default:
+					// Regular character input
+					if len(msg.String()) == 1 {
+						m.searchQuery += msg.String()
+						m.updateSearchResults()
+					}
+				}
+				return m, nil
 			}
 		}
 
@@ -204,8 +372,24 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m chatModel) View() string {
 	var s strings.Builder
 
-	// Header
-	header := headerStyle.Render(fmt.Sprintf("💬 Llemecode Chat - Model: %s", m.agent.GetMessages()[0].Role))
+	// Header with memory indicator
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	memMB := float64(memStats.Alloc) / 1024 / 1024
+
+	// Determine memory color based on usage
+	memColor := "42" // Green
+	if memMB > 500 {
+		memColor = "196" // Red
+	} else if memMB > 200 {
+		memColor = "214" // Orange
+	}
+
+	memIndicator := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(memColor)).
+		Render(fmt.Sprintf(" [%.1f MB]", memMB))
+
+	header := headerStyle.Render(fmt.Sprintf("💬 Llemecode Chat - Model: %s", m.agent.GetMessages()[0].Role)) + memIndicator
 	s.WriteString(header + "\n\n")
 
 	// Viewport with messages
@@ -213,18 +397,67 @@ func (m chatModel) View() string {
 
 	// Status line
 	if m.waiting {
-		s.WriteString(m.spinner.View() + " Thinking...\n")
+		waitMsg := "Thinking..."
+		if m.activeBackgroundTask != "" {
+			waitMsg = fmt.Sprintf("Running: %s...", m.activeBackgroundTask)
+		}
+		s.WriteString(m.spinner.View() + " " + waitMsg + "\n")
 	} else if m.err != nil {
 		s.WriteString(errorStyle.Render(fmt.Sprintf("⚠ %v", m.err)) + "\n")
+	} else if m.activeBackgroundTask != "" {
+		// Show background task even when not waiting
+		s.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Render(fmt.Sprintf("⚙️  Background: %s", m.activeBackgroundTask)) + "\n")
+	} else if m.bgBenchmark != nil && !m.benchmarkDone {
+		// Show background benchmark status
+		select {
+		case <-m.bgBenchmark.Done():
+			m.benchmarkDone = true
+			s.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("42")).
+				Render("📊 ✓ Background benchmarking complete!") + "\n")
+		default:
+			progress := m.bgBenchmark.GetProgress()
+			if progress != "" {
+				s.WriteString(lipgloss.NewStyle().
+					Foreground(lipgloss.Color("241")).
+					Render("📊 "+progress) + "\n")
+			}
+		}
+	}
+
+	// Search mode indicator
+	if m.searchMode {
+		searchStatus := fmt.Sprintf("(reverse-search)`%s': ", m.searchQuery)
+		if len(m.searchResults) > 0 {
+			preview := m.history[m.searchResults[m.searchIndex]]
+			if len(preview) > 50 {
+				preview = preview[:47] + "..."
+			}
+			searchStatus += preview
+		} else if m.searchQuery != "" {
+			searchStatus += "no matches"
+		}
+		s.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Render(searchStatus) + "\n")
 	}
 
 	// Textarea
 	s.WriteString(m.textarea.View() + "\n")
 
 	// Help
-	help := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		Render("Enter: send • Esc: quit")
+	var help string
+	if m.searchMode {
+		help = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Render("Ctrl+N: next • Ctrl+P: prev • Enter: use • Esc: cancel")
+	} else {
+		help = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241")).
+			Render("Enter: send • ↑↓: history • Ctrl+R: search • Esc: quit")
+	}
 	s.WriteString("\n" + help)
 
 	return s.String()
@@ -249,6 +482,16 @@ func (m *chatModel) updateViewport() {
 			content.WriteString(toolStyle.Render(msg.content) + "\n")
 		case "error":
 			content.WriteString(errorStyle.Render(msg.content) + "\n\n")
+		case "system":
+			rendered := msg.content
+			if m.glamour != nil {
+				if r, err := m.glamour.Render(msg.content); err == nil {
+					rendered = r
+				}
+			}
+			content.WriteString(lipgloss.NewStyle().
+				Foreground(lipgloss.Color("111")).
+				Render(rendered) + "\n\n")
 		}
 	}
 
@@ -267,4 +510,47 @@ func (m chatModel) chat(userMsg string) tea.Cmd {
 			toolCalls: resp.ToolCalls,
 		}
 	}
+}
+
+// updateSearchResults searches through history for the current query
+func (m *chatModel) updateSearchResults() {
+	m.searchResults = nil
+	if m.searchQuery == "" {
+		return
+	}
+
+	// Search backwards through history
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(m.history[i]), strings.ToLower(m.searchQuery)) {
+			m.searchResults = append(m.searchResults, i)
+		}
+	}
+
+	if len(m.searchResults) > 0 {
+		m.searchIndex = 0
+	}
+}
+
+// updateAgentDisabledTools updates the agent with the combined list of disabled tools
+func (m *chatModel) updateAgentDisabledTools(cfg *config.Config) {
+	// Combine config-level and session-level disabled tools
+	disabledMap := make(map[string]bool)
+
+	// Add config-level disabled tools
+	for _, toolName := range cfg.DisabledTools {
+		disabledMap[toolName] = true
+	}
+
+	// Add session-level disabled tools
+	for toolName := range m.sessionDisabledTools {
+		disabledMap[toolName] = true
+	}
+
+	// Convert map back to slice
+	disabledList := make([]string, 0, len(disabledMap))
+	for toolName := range disabledMap {
+		disabledList = append(disabledList, toolName)
+	}
+
+	m.agent.SetDisabledTools(disabledList)
 }

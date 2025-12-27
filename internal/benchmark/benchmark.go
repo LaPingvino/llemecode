@@ -144,6 +144,10 @@ func (b *Benchmarker) BenchmarkModel(ctx context.Context, modelName string, prog
 	return score, nil
 }
 
+func (b *Benchmarker) ListModels(ctx context.Context) ([]ollama.ModelInfo, error) {
+	return b.client.ListModels(ctx)
+}
+
 func (b *Benchmarker) BenchmarkAll(ctx context.Context, progressChan chan<- string) ([]ModelScore, error) {
 	models, err := b.client.ListModels(ctx)
 	if err != nil {
@@ -213,6 +217,19 @@ func (b *Benchmarker) SaveResults(scores []ModelScore, outputPath string) error 
 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
 		return fmt.Errorf("write results: %w", err)
 	}
+
+	return nil
+}
+
+// DetectToolSupport detects and saves tool capabilities for a single model
+func (b *Benchmarker) DetectToolSupport(ctx context.Context, modelName string, cfg *config.Config) error {
+	capability := b.detector.DetectCapabilities(ctx, modelName, nil)
+
+	if cfg.ModelCapabilities == nil {
+		cfg.ModelCapabilities = make(map[string]config.ModelCapability)
+	}
+
+	cfg.ModelCapabilities[modelName] = capability
 
 	return nil
 }

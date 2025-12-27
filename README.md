@@ -43,20 +43,33 @@ export PATH=$PATH:$(pwd)
 
 ### First Run
 
-When you run Llemecode for the first time, it will:
+When you run Llemecode for the first time, you'll see an **interactive model picker**:
 
-1. Discover all models in your local Ollama instance
-2. Test each model for native tool calling support
-3. Determine the best fallback format (XML/JSON/text) for models without native support
-4. Run benchmark tasks to evaluate model strengths
-5. Select the best model as your default
-6. Save configuration to `~/.config/llemecode/config.json`
+1. **Select Your Model**: Choose from a list of your locally available Ollama models
+2. **Start Chatting Immediately**: No waiting for benchmarks!
+3. **Background Benchmarking**: Evaluation runs in the background while you work
 
 ```bash
 ./llemecode
 ```
 
-You'll see a beautiful progress interface showing the detection and benchmarking process!
+The interface will show:
+- All your models with their sizes
+- A beautiful selection UI (↑/↓ to navigate, Enter to select)
+- Immediate access to chat after selection
+- Background benchmark progress in the status line
+
+**Traditional Setup** (for full benchmarking before starting):
+```bash
+./llemecode --setup
+```
+
+This will:
+1. Test each model for native tool calling support
+2. Determine the best fallback format (XML/JSON/text)
+3. Run comprehensive benchmark tasks
+4. Select the best model as your default
+5. Save configuration to `~/.config/llemecode/config.json`
 
 ### Using a Powerful Model for Evaluation
 
@@ -142,7 +155,30 @@ Once in the chat:
 - The AI can use tools automatically (read files, run commands, fetch web content)
 - Responses are rendered with beautiful markdown formatting
 - Tool calls are displayed with their arguments and results
+- Use **slash commands** to manage Llemecode (see below)
 - Press **Esc** or **Ctrl+C** to quit
+
+### Slash Commands
+
+Manage Llemecode directly from the chat interface:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all available commands |
+| `/models` | List available models with capabilities |
+| `/model <name>` | Switch to a different model |
+| `/prompts` | View available system prompts |
+| `/reset` | Clear conversation history |
+| `/benchmark` | Run benchmarks in background |
+| `/config` | Show configuration file location |
+
+**Examples:**
+```
+/models              # See all your models
+/model llama3.2      # Switch to llama3.2
+/reset               # Start fresh conversation
+/benchmark           # Re-evaluate all models
+```
 
 ### Example Interactions
 

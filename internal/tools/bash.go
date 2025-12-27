@@ -3,22 +3,33 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 )
 
-type BashTool struct{}
+type BashTool struct {
+	executor CommandExecutor
+}
+
+// CommandExecutor is an interface for executing commands
+// This allows different execution strategies (direct, interactive, etc.)
+type CommandExecutor interface {
+	Execute(ctx context.Context, command string) (output string, exitCode int, err error)
+}
 
 func NewBashTool() *BashTool {
 	return &BashTool{}
 }
 
+// SetExecutor sets the command executor
+func (t *BashTool) SetExecutor(executor CommandExecutor) {
+	t.executor = executor
+}
+
 func (t *BashTool) Name() string {
-	return "bash"
+	return "run_command"
 }
 
 func (t *BashTool) Description() string {
-	return "Execute a bash command and return the output"
+	return "Execute a shell command in an interactive window with real-time output, scrolling, and input support (Ctrl+F for passwords/prompts). Use this to run system commands, scripts, or CLI tools."
 }
 
 func (t *BashTool) Parameters() map[string]interface{} {
@@ -27,7 +38,7 @@ func (t *BashTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "The bash command to execute",
+				"description": "The shell command to execute",
 			},
 		},
 		"required": []string{"command"},
@@ -40,15 +51,15 @@ func (t *BashTool) Execute(ctx context.Context, args map[string]interface{}) (st
 		return "", fmt.Errorf("command must be a string")
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	output, err := cmd.CombinedOutput()
-
-	result := strings.Builder{}
-	result.WriteString(string(output))
-
-	if err != nil {
-		result.WriteString(fmt.Sprintf("\nError: %v", err))
+	if t.executor == nil {
+		return "", fmt.Errorf("no command executor configured")
 	}
 
-	return result.String(), nil
+	output, exitCode, err := t.executor.Execute(ctx, command)
+
+	if err != nil {
+		return fmt.Sprintf("%s\n\nExit code: %d\nError: %v", output, exitCode, err), nil
+	}
+
+	return fmt.Sprintf("%s\n\nExit code: %d", output, exitCode), nil
 }

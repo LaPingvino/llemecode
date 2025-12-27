@@ -13,6 +13,33 @@ type Config struct {
 	BenchmarkTasks    []BenchmarkTask            `json:"benchmark_tasks"`
 	SystemPrompts     map[string]string          `json:"system_prompts"`
 	ModelCapabilities map[string]ModelCapability `json:"model_capabilities"`
+	ModelAsTools      []ModelAsTool              `json:"model_as_tools,omitempty"`
+	Permissions       PermissionConfig           `json:"permissions"`
+	DisabledTools     []string                   `json:"disabled_tools,omitempty"`
+	CustomTools       []map[string]interface{}   `json:"custom_tools,omitempty"`
+	MCPServers        []MCPServerConfig          `json:"mcp_servers,omitempty"`
+}
+
+type MCPServerConfig struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Enabled bool     `json:"enabled"`
+}
+
+type PermissionConfig struct {
+	AutoApproveSafe        bool     `json:"auto_approve_safe"`
+	AutoApproveRead        bool     `json:"auto_approve_read"`
+	RequireApprovalWrite   bool     `json:"require_approval_write"`
+	RequireApprovalExecute bool     `json:"require_approval_execute"`
+	RequireApprovalNetwork bool     `json:"require_approval_network"`
+	BlockedCommands        []string `json:"blocked_commands"`
+}
+
+type ModelAsTool struct {
+	ModelName   string `json:"model_name"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
 }
 
 type BenchmarkTask struct {
@@ -99,21 +126,38 @@ func (c *Config) ModelSupportsTools(modelName string) bool {
 	if cap, ok := c.ModelCapabilities[modelName]; ok {
 		return cap.SupportsTools
 	}
-	// Default: assume tools are supported for unknown models
-	return true
+	// Default: assume tools are NOT supported for unknown models (use fallback)
+	// This is safer - better to use fallback unnecessarily than to crash
+	return false
 }
 
 func (c *Config) GetToolCallFormat(modelName string) string {
 	if cap, ok := c.ModelCapabilities[modelName]; ok {
 		return cap.ToolCallFormat
 	}
-	return "native"
+	// Default to text fallback for unknown models (simplest, most reliable)
+	// Format: USE_TOOL: tool_name\nARGS: {...}
+	return "text"
 }
 
 func DefaultConfig() *Config {
 	return &Config{
 		OllamaURL:    "http://localhost:11434",
 		DefaultModel: "",
+		Permissions: PermissionConfig{
+			AutoApproveSafe:        true,
+			AutoApproveRead:        false, // Ask for read operations
+			RequireApprovalWrite:   true,
+			RequireApprovalExecute: true,
+			RequireApprovalNetwork: true, // Ask for network operations
+			BlockedCommands: []string{
+				"rm -rf /",
+				"dd if=",
+				"mkfs",
+				":(){ :|:& };:",
+				"> /dev/sda",
+			},
+		},
 		BenchmarkTasks: []BenchmarkTask{
 			{
 				Name:        "code_generation",
@@ -147,7 +191,20 @@ func DefaultConfig() *Config {
 			},
 		},
 		SystemPrompts: map[string]string{
-			"default": `You are a helpful coding assistant with access to tools. Use tools when needed to help the user.`,
+			"default": `You are a helpful coding assistant with access to tools.
+
+Available tools:
+{{TOOLS}}
+
+Use these tools proactively when they would help answer the user's question. For example:
+- If asked about code in files, read them first with read_file
+- If asked to create or modify files, use write_file
+- If you need to check directory contents, use list_files
+- If you need information from the web, use web_fetch
+- If you need to run commands or check system state, use bash
+- If specialized expertise is needed, delegate to model tools (ask_<model>)
+
+Always explain what you're doing when using tools.`,
 
 			"tool_xml": `You are a helpful coding assistant. When you need to use a tool, respond with XML tags like this:
 <tool_call>
