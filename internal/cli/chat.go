@@ -8,6 +8,7 @@ import (
 
 	"github.com/LaPingvino/llemecode/internal/agent"
 	"github.com/LaPingvino/llemecode/internal/config"
+	"github.com/LaPingvino/llemecode/internal/logger"
 	"github.com/LaPingvino/llemecode/internal/ollama"
 	"github.com/LaPingvino/llemecode/internal/tools"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -41,6 +42,7 @@ type chatModel struct {
 	searchQuery          string          // Current search query
 	searchResults        []int           // Indices in history matching search
 	searchIndex          int             // Current position in search results
+	statusMessage        string          // Current status message from logger
 }
 
 type message struct {
@@ -52,6 +54,10 @@ type responseMsg struct {
 	content   string
 	toolCalls []agent.ToolExecution
 	err       error
+}
+
+type statusMsg struct {
+	message string
 }
 
 var (
@@ -160,6 +166,12 @@ func RunChat(ctx context.Context, client *ollama.Client, cfg *config.Config, too
 	m.updateViewport()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// Set up logger status updater to send status messages to the TUI
+	logger.SetStatusUpdater(func(msg string) {
+		p.Send(statusMsg{message: msg})
+	})
+
 	_, err = p.Run()
 	return err
 }
@@ -330,12 +342,14 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case statusMsg:
+		m.statusMessage = msg.message
+
 	case responseMsg:
-		fmt.Printf("[DEBUG] Update: Received responseMsg, err=%v, tool_calls=%d, content_len=%d\n",
-			msg.err, len(msg.toolCalls), len(msg.content))
+		logger.Status("Received response: err=%v, tool_calls=%d, content_len=%d", msg.err, len(msg.toolCalls), len(msg.content))
 		m.waiting = false
 		if msg.err != nil {
-			fmt.Printf("[DEBUG] Update: Processing error: %v\n", msg.err)
+			logger.Status("Processing error: %v", msg.err)
 			m.err = msg.err
 			m.messages = append(m.messages, message{
 				role:    "error",
@@ -343,10 +357,10 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			// Add tool calls if any
-			fmt.Printf("[DEBUG] Update: Adding %d tool calls to messages\n", len(msg.toolCalls))
+			logger.Status("Adding %d tool calls to messages", len(msg.toolCalls))
 			for idx, tc := range msg.toolCalls {
 				formatted := agent.FormatToolCall(tc)
-				fmt.Printf("[DEBUG] Update: Tool call %d formatted, length: %d\n", idx, len(formatted))
+				logger.Status("Tool call %d formatted, length: %d", idx, len(formatted))
 				m.messages = append(m.messages, message{
 					role:    "tool",
 					content: formatted,
@@ -355,16 +369,16 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Add assistant response
 			if msg.content != "" {
-				fmt.Printf("[DEBUG] Update: Adding assistant response, length: %d\n", len(msg.content))
+				logger.Status("Adding assistant response, length: %d", len(msg.content))
 				m.messages = append(m.messages, message{
 					role:    "assistant",
 					content: msg.content,
 				})
 			} else {
-				fmt.Printf("[DEBUG] Update: No assistant content to add\n")
+				logger.Status("No assistant content to add")
 			}
 		}
-		fmt.Printf("[DEBUG] Update: Updating viewport, total messages: %d\n", len(m.messages))
+		logger.Status("Updating viewport, total messages: %d", len(m.messages))
 		m.updateViewport()
 	}
 
@@ -414,6 +428,11 @@ func (m chatModel) View() string {
 		s.WriteString(m.spinner.View() + " " + waitMsg + "\n")
 	} else if m.err != nil {
 		s.WriteString(errorStyle.Render(fmt.Sprintf("⚠ %v", m.err)) + "\n")
+	} else if m.statusMessage != "" {
+		// Show current status message from logger
+		s.WriteString(lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Render(fmt.Sprintf("🔍 %s", m.statusMessage)) + "\n")
 	} else if m.activeBackgroundTask != "" {
 		// Show background task even when not waiting
 		s.WriteString(lipgloss.NewStyle().
@@ -511,14 +530,13 @@ func (m *chatModel) updateViewport() {
 
 func (m chatModel) chat(userMsg string) tea.Cmd {
 	return func() tea.Msg {
-		fmt.Printf("[DEBUG] chat: Starting agent.Chat call\n")
+		logger.Status("Starting agent.Chat call")
 		resp, err := m.agent.Chat(m.ctx, userMsg)
 		if err != nil {
-			fmt.Printf("[DEBUG] chat: agent.Chat returned error: %v\n", err)
+			logger.Status("agent.Chat returned error: %v", err)
 			return responseMsg{err: err}
 		}
-		fmt.Printf("[DEBUG] chat: agent.Chat successful, content length: %d, tool calls: %d\n",
-			len(resp.Content), len(resp.ToolCalls))
+		logger.Status("agent.Chat successful, content length: %d, tool calls: %d", len(resp.Content), len(resp.ToolCalls))
 		return responseMsg{
 			content:   resp.Content,
 			toolCalls: resp.ToolCalls,

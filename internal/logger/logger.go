@@ -172,16 +172,23 @@ func Status(format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
 
 	mu.Lock()
-	defer mu.Unlock()
+	updater := statusUpdater
+	isEnabled := enabled
+	mu.Unlock()
 
 	// Update status bar if callback is set
-	if statusUpdater != nil {
-		statusUpdater(message)
+	if updater != nil {
+		updater(message)
 	}
 
 	// Also log to file if enabled
-	if enabled {
+	if isEnabled {
 		timestamp := time.Now().Format("15:04:05.000")
-		fmt.Fprintf(logWriter, "[%s] STATUS: %s\n", timestamp, message)
+		logLine := fmt.Sprintf("[%s] STATUS: %s", timestamp, message)
+		select {
+		case logChan <- logLine:
+		default:
+			// Buffer full, skip logging this status message
+		}
 	}
 }
