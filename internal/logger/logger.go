@@ -35,8 +35,8 @@ func Init(filePath string) error {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	// Write to both file and stderr
-	logWriter = io.MultiWriter(logFile, os.Stderr)
+	// Write only to file, not to stderr (to avoid interfering with TUI)
+	logWriter = logFile
 	enabled = true
 	sessionID = time.Now().Format("20060102-150405")
 
