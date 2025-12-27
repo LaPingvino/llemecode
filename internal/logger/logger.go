@@ -15,6 +15,8 @@ var (
 	enabled       bool
 	statusUpdater func(string) // Callback to update status bar in TUI
 	sessionID     string
+	logChan       chan string   // Async logging channel
+	done          chan struct{} // Signal when logging is done
 )
 
 // Init initializes the logger with a file path
@@ -38,6 +40,18 @@ func Init(filePath string) error {
 	enabled = true
 	sessionID = time.Now().Format("20060102-150405")
 
+	// Create async logging channel
+	logChan = make(chan string, 1000) // Buffer up to 1000 messages
+	done = make(chan struct{})
+
+	// Start async writer goroutine
+	go func() {
+		for msg := range logChan {
+			fmt.Fprintln(logWriter, msg)
+		}
+		close(done)
+	}()
+
 	Log("=== Llemecode Session Started ===")
 	Log("Session ID: %s", sessionID)
 	Log("Log file: %s", filePath)
@@ -49,63 +63,94 @@ func Init(filePath string) error {
 // Close closes the log file
 func Close() {
 	mu.Lock()
-	defer mu.Unlock()
-
-	if logFile != nil {
-		Log("=== Session Ended ===")
-		logFile.Close()
-		logFile = nil
-	}
+	wasEnabled := enabled
 	enabled = false
+	mu.Unlock()
+
+	if wasEnabled {
+		Log("=== Session Ended ===")
+		close(logChan)
+		<-done // Wait for all messages to be written
+
+		mu.Lock()
+		if logFile != nil {
+			logFile.Close()
+			logFile = nil
+		}
+		mu.Unlock()
+	}
 }
 
 // Log writes a log message
 func Log(format string, args ...interface{}) {
-	if !enabled {
+	mu.Lock()
+	isEnabled := enabled
+	mu.Unlock()
+
+	if !isEnabled {
 		// Still print to stderr for debugging even without file logging
 		fmt.Fprintf(os.Stderr, "[DEBUG] "+format+"\n", args...)
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
 	timestamp := time.Now().Format("15:04:05.000")
 	message := fmt.Sprintf(format, args...)
-	fmt.Fprintf(logWriter, "[%s] %s\n", timestamp, message)
+	logLine := fmt.Sprintf("[%s] %s", timestamp, message)
+
+	// Non-blocking send to channel
+	select {
+	case logChan <- logLine:
+	default:
+		// Channel full, log dropped (shouldn't happen with 1000 buffer)
+		fmt.Fprintf(os.Stderr, "[WARN] Log buffer full, message dropped\n")
+	}
 }
 
 // LogConversation logs a conversation message
 func LogConversation(role, content string) {
-	if !enabled {
+	mu.Lock()
+	isEnabled := enabled
+	mu.Unlock()
+
+	if !isEnabled {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
 	timestamp := time.Now().Format("15:04:05.000")
-	fmt.Fprintf(logWriter, "\n[%s] === %s ===\n%s\n", timestamp, role, content)
+	logLine := fmt.Sprintf("\n[%s] === %s ===\n%s", timestamp, role, content)
+
+	select {
+	case logChan <- logLine:
+	default:
+		fmt.Fprintf(os.Stderr, "[WARN] Log buffer full, conversation dropped\n")
+	}
 }
 
 // LogToolCall logs a tool invocation
 func LogToolCall(name string, args map[string]interface{}, result string, err error) {
-	if !enabled {
+	mu.Lock()
+	isEnabled := enabled
+	mu.Unlock()
+
+	if !isEnabled {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
 	timestamp := time.Now().Format("15:04:05.000")
-	fmt.Fprintf(logWriter, "\n[%s] === TOOL CALL: %s ===\n", timestamp, name)
-	fmt.Fprintf(logWriter, "Arguments: %v\n", args)
+	var logLine string
 	if err != nil {
-		fmt.Fprintf(logWriter, "Error: %v\n", err)
+		logLine = fmt.Sprintf("\n[%s] === TOOL CALL: %s ===\nArguments: %v\nError: %v\n=========================",
+			timestamp, name, args, err)
 	} else {
-		fmt.Fprintf(logWriter, "Result: %s\n", result)
+		logLine = fmt.Sprintf("\n[%s] === TOOL CALL: %s ===\nArguments: %v\nResult: %s\n=========================",
+			timestamp, name, args, result)
 	}
-	fmt.Fprintf(logWriter, "=========================\n")
+
+	select {
+	case logChan <- logLine:
+	default:
+		fmt.Fprintf(os.Stderr, "[WARN] Log buffer full, tool call dropped\n")
+	}
 }
 
 // IsEnabled returns whether logging is enabled
